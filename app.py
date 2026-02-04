@@ -9,24 +9,38 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 # 1. Setup Logging
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# 2. Flask Web Server for Render Port Binding
+# 2. Flask Web Server for Render
 web_app = Flask(__name__)
 
 @web_app.route('/')
 def health_check():
-    return "Bot is running!", 200
+    return "Cloud Bridge Online", 200
 
 def run_flask():
-    # Render provides the port via environment variable
     port = int(os.getenv("PORT", 10000))
     web_app.run(host='0.0.0.0', port=port)
 
-# SECURITY & KEYS
+# --- SECURE KEY ROTATION LOGIC ---
+# This pulls the keys from the Render Environment Variables
+RAW_KEYS = os.getenv('GEMINI_KEYS', '')
+# Splits the string by comma and removes extra spaces
+GEMINI_KEYS = [k.strip() for k in RAW_KEYS.split(',') if k.strip()]
+current_key_index = 0
+
+def get_gemini_client():
+    global current_key_index
+    if not GEMINI_KEYS:
+        logging.error("❌ No GEMINI_KEYS found in Environment Variables!")
+        return None
+    key = GEMINI_KEYS[current_key_index]
+    return genai.Client(api_key=key)
+
+# Initial setup
+client = get_gemini_client()
+
+# TOKEN & AUTH
 AUTHORIZED_USER_ID = int(os.getenv('AUTHORIZED_USER_ID', '6373322579'))
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-
-client = genai.Client(api_key=GEMINI_API_KEY)
 
 chat_memories = {}
 
@@ -41,17 +55,19 @@ def record_message(user_id, message_id):
 # --- COMMANDS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id): return
-    msg = await update.message.reply_text(
+    num_keys = len(GEMINI_KEYS)
+    await update.message.reply_text(
         "🚀 **HOPEFREY CLOUD BRIDGE**\n\n"
+        f"✅ System: Online\n"
+        f"🔑 Keys Loaded: {num_keys}\n\n"
         "Commands:\n"
         "• `start ai` / `stop ai` - Toggle Gemini\n"
         "• `clear` - Wipe chat history"
     )
-    record_message(update.effective_user.id, update.message.message_id)
-    record_message(update.effective_user.id, msg.message_id)
 
 # --- MESSAGE HANDLER ---
 async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global client, current_key_index
     user_id = update.effective_user.id
     if not is_authorized(user_id): return
 
@@ -61,47 +77,49 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_text == "clear":
         if user_id in chat_memories:
             for msg_id in chat_memories[user_id]:
-                try:
-                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
-                except:
-                    pass
+                try: await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
+                except: pass
             chat_memories[user_id] = [] 
         return
 
-    if user_text == "start ai":
-        context.user_data['ai_active'] = True
-        msg = await update.message.reply_text("🤖 AI Activated.")
-        record_message(user_id, msg.message_id)
-        return
-    
-    if user_text == "stop ai":
-        context.user_data['ai_active'] = False
-        msg = await update.message.reply_text("💤 AI Deactivated.")
+    if user_text in ["start ai", "stop ai"]:
+        context.user_data['ai_active'] = (user_text == "start ai")
+        msg = await update.message.reply_text("🤖 AI Activated." if user_text == "start ai" else "💤 AI Deactivated.")
         record_message(user_id, msg.message_id)
         return
 
     if context.user_data.get('ai_active'):
+        if not client:
+            await update.message.reply_text("❌ Configuration Error: No API keys found.")
+            return
+
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        try:
-            # Note: 429 errors usually mean the Free API quota is hit. 
-            response = client.models.generate_content(model="gemini-2.5-flash", contents=update.message.text)
-            msg = await update.message.reply_text(response.text)
-            record_message(user_id, msg.message_id)
-        except Exception as e:
-            await update.message.reply_text(f"❌ AI Error: {str(e)}")
+        
+        # Try each key in Round-Robin if a 429 occurs
+        for _ in range(len(GEMINI_KEYS)):
+            try:
+                response = client.models.generate_content(model="gemini-2.0-flash", contents=update.message.text)
+                msg = await update.message.reply_text(response.text)
+                record_message(user_id, msg.message_id)
+                return
+            except Exception as e:
+                if "429" in str(e):
+                    logging.warning(f"Key {current_key_index} hit rate limit. Rotating...")
+                    current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
+                    client = get_gemini_client()
+                    continue
+                else:
+                    await update.message.reply_text(f"❌ AI Error: {str(e)}")
+                    return
+        
+        await update.message.reply_text("⚠️ All keys are rate-limited. Try again in a minute.")
     else:
-        print(f"BRIDGE LOG: {update.message.text}")
         msg = await update.message.reply_text(f"✅ Bridge: {update.message.text}")
         record_message(user_id, msg.message_id)
 
 if __name__ == '__main__':
-    # Start Flask in a background thread
     threading.Thread(target=run_flask, daemon=True).start()
-    
-    # Start Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_messages))
-    
-    print("🚀 Cloud Bridge with Port Binding is running...")
     app.run_polling()
