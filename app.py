@@ -84,7 +84,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         try:
             # Note: 429 errors usually mean the Free API quota is hit. 
-            response = client.models.generate_content(model="gemini-2.0-flash", contents=update.message.text)
+            response = client.models.generate_content(model="gemini-2.5-flash", contents=update.message.text)
             msg = await update.message.reply_text(response.text)
             record_message(user_id, msg.message_id)
         except Exception as e:
