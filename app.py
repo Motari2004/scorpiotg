@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+from flask import Flask
 from google import genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
@@ -7,14 +9,25 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 # 1. Setup Logging
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# SECURITY & KEYS (Pulled from Render Environment Variables)
+# 2. Flask Web Server for Render Port Binding
+web_app = Flask(__name__)
+
+@web_app.route('/')
+def health_check():
+    return "Bot is running!", 200
+
+def run_flask():
+    # Render provides the port via environment variable
+    port = int(os.getenv("PORT", 10000))
+    web_app.run(host='0.0.0.0', port=port)
+
+# SECURITY & KEYS
 AUTHORIZED_USER_ID = int(os.getenv('AUTHORIZED_USER_ID', '6373322579'))
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Memory to store message IDs for clearing
 chat_memories = {}
 
 def is_authorized(user_id):
@@ -45,9 +58,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text.lower().strip()
     record_message(user_id, update.message.message_id)
 
-    # FEATURE: CLEAR CHAT
     if user_text == "clear":
-        status_msg = await update.message.reply_text("🧼 Cleaning chat history...")
         if user_id in chat_memories:
             for msg_id in chat_memories[user_id]:
                 try:
@@ -57,7 +68,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_memories[user_id] = [] 
         return
 
-    # AI Toggles
     if user_text == "start ai":
         context.user_data['ai_active'] = True
         msg = await update.message.reply_text("🤖 AI Activated.")
@@ -70,10 +80,10 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record_message(user_id, msg.message_id)
         return
 
-    # Process AI or Bridge
     if context.user_data.get('ai_active'):
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         try:
+            # Note: 429 errors usually mean the Free API quota is hit. 
             response = client.models.generate_content(model="gemini-2.0-flash", contents=update.message.text)
             msg = await update.message.reply_text(response.text)
             record_message(user_id, msg.message_id)
@@ -85,9 +95,13 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record_message(user_id, msg.message_id)
 
 if __name__ == '__main__':
+    # Start Flask in a background thread
+    threading.Thread(target=run_flask, daemon=True).start()
+    
+    # Start Telegram Bot
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_messages))
     
-    print("🚀 Cloud Bridge is running...")
+    print("🚀 Cloud Bridge with Port Binding is running...")
     app.run_polling()
