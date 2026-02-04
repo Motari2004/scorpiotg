@@ -1,6 +1,8 @@
 import logging
 import os
 import threading
+import datetime
+import time
 from flask import Flask
 from google import genai
 from telegram import Update
@@ -20,10 +22,14 @@ def run_flask():
     port = int(os.getenv("PORT", 10000))
     web_app.run(host='0.0.0.0', port=port)
 
+# --- INTERNAL HEARTBEAT ---
+def internal_heartbeat():
+    while True:
+        logging.info("💓 SYSTEM HEARTBEAT: Bot is active and polling...")
+        time.sleep(60)
+
 # --- SECURE KEY ROTATION LOGIC ---
-# This pulls the keys from the Render Environment Variables
 RAW_KEYS = os.getenv('GEMINI_KEYS', '')
-# Splits the string by comma and removes extra spaces
 GEMINI_KEYS = [k.strip() for k in RAW_KEYS.split(',') if k.strip()]
 current_key_index = 0
 
@@ -35,7 +41,6 @@ def get_gemini_client():
     key = GEMINI_KEYS[current_key_index]
     return genai.Client(api_key=key)
 
-# Initial setup
 client = get_gemini_client()
 
 # TOKEN & AUTH
@@ -62,7 +67,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔑 Keys Loaded: {num_keys}\n\n"
         "Commands:\n"
         "• `start ai` / `stop ai` - Toggle Gemini\n"
-        "• `clear` - Wipe chat history"
+        "• `clear` - Wipe chat history\n"
+        "• `.ping` - Manual status check"
     )
 
 # --- MESSAGE HANDLER ---
@@ -73,6 +79,11 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text.lower().strip()
     record_message(user_id, update.message.message_id)
+
+    # Manual Ping Endpoint inside Telegram
+    if user_text == ".ping":
+        await update.message.reply_text(f"🏓 **PONG**\nTime: {datetime.datetime.now().strftime('%H:%M:%S')}")
+        return
 
     if user_text == "clear":
         if user_id in chat_memories:
@@ -95,7 +106,6 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
-        # Try each key in Round-Robin if a 429 occurs
         for _ in range(len(GEMINI_KEYS)):
             try:
                 response = client.models.generate_content(model="gemini-2.5-flash", contents=update.message.text)
@@ -118,8 +128,14 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         record_message(user_id, msg.message_id)
 
 if __name__ == '__main__':
+    # Flask (External Ping)
     threading.Thread(target=run_flask, daemon=True).start()
+    # Heartbeat (Internal Ping)
+    threading.Thread(target=internal_heartbeat, daemon=True).start()
+    
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler('start', start))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_messages))
-    app.run_polling()
+    
+    logging.info("--- SYSTEM ONLINE ---")
+    app.run_polling(drop_pending_updates=True)
