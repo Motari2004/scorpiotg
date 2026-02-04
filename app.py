@@ -98,7 +98,7 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Try each key in Round-Robin if a 429 occurs
         for _ in range(len(GEMINI_KEYS)):
             try:
-                response = client.models.generate_content(model="gemini-2.0-flash", contents=update.message.text)
+                response = client.models.generate_content(model="gemini-2.5-flash", contents=update.message.text)
                 msg = await update.message.reply_text(response.text)
                 record_message(user_id, msg.message_id)
                 return
