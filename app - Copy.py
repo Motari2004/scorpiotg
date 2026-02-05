@@ -16,10 +16,13 @@ web_app = Flask(__name__)
 
 @web_app.route('/')
 def health_check():
-    logging.info("🌐 EXTERNAL PING: Health check received.")
+    # Optimized: returning an empty string stops Cron-job.org "output too large" errors
+    # but still returns a 200 OK to keep Render awake.
+    logging.info("🌐 EXTERNAL PING: Cron-job received.")
     return "", 200
 
 def run_flask():
+    # Render uses port 10000 by default; ensuring host is 0.0.0.0 is critical
     port = int(os.getenv("PORT", 10000))
     web_app.run(host='0.0.0.0', port=port)
 
@@ -48,10 +51,6 @@ client = get_gemini_client()
 AUTHORIZED_USER_ID = int(os.getenv('AUTHORIZED_USER_ID', '6373322579'))
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 
-# Memory limit for a single session (set high for "remember everything" feel)
-# Note: Extremely long histories may eventually hit API token limits.
-MAX_MEMORY = 200 
-
 chat_memories = {}
 
 def is_authorized(user_id):
@@ -69,11 +68,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 **HOPEFREY CLOUD BRIDGE**\n\n"
         f"✅ System: Online\n"
-        f"🧠 Memory: Deep (Remembering everything)\n"
         f"🔑 Keys Loaded: {num_keys}\n\n"
         "Commands:\n"
         "• `start ai` / `stop ai` - Toggle Gemini\n"
-        "• `brainwash` - Wipe all memory and history\n"
+        "• `clear` - Wipe chat history\n"
         "• `.ping` - Manual status check"
     )
 
@@ -83,69 +81,43 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id): return
 
-    raw_text = update.message.text
-    user_text_lower = raw_text.lower().strip()
+    user_text = update.message.text.lower().strip()
     record_message(user_id, update.message.message_id)
 
-    # 1. Manual Status Check
-    if user_text_lower == ".ping":
+    if user_text == ".ping":
         await update.message.reply_text(f"🏓 **PONG**\nTime: {datetime.datetime.now().strftime('%H:%M:%S')}")
         return
 
-    # 2. BRAINWASH / CLEAR Command
-    if user_text_lower in ["clear", "brainwash"]:
-        # Reset the AI's contextual history
-        context.user_data['chat_history'] = []
-        
-        # Delete message history in the Telegram chat
+    if user_text == "clear":
         if user_id in chat_memories:
             for msg_id in chat_memories[user_id]:
                 try: await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=msg_id)
                 except: pass
             chat_memories[user_id] = [] 
-            
-        await update.message.reply_text("🧠 **BRAINWASHED.** My memory has been wiped clean.")
         return
 
-    # 3. Toggle AI
-    if user_text_lower in ["start ai", "stop ai"]:
-        context.user_data['ai_active'] = (user_text_lower == "start ai")
-        msg = await update.message.reply_text("🤖 AI Activated. Remembering context..." if user_text_lower == "start ai" else "💤 AI Deactivated.")
+    if user_text in ["start ai", "stop ai"]:
+        context.user_data['ai_active'] = (user_text == "start ai")
+        msg = await update.message.reply_text("🤖 AI Activated." if user_text == "start ai" else "💤 AI Deactivated.")
         record_message(user_id, msg.message_id)
         return
 
-    # 4. AI Logic with Infinite Context
     if context.user_data.get('ai_active'):
         if not client:
             await update.message.reply_text("❌ Configuration Error: No API keys found.")
             return
 
-        # Initialize history if missing
-        if 'chat_history' not in context.user_data:
-            context.user_data['chat_history'] = []
-
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
         
-        # Key Rotation Logic
         for _ in range(len(GEMINI_KEYS)):
             try:
-                # Create chat session with current history
-                chat = client.chats.create(
-                    model="gemini-2.0-flash",
-                    config={'history': context.user_data['chat_history']}
-                )
-                
-                response = chat.send_message(raw_text)
-                
-                # Update history and keep it within MAX_MEMORY bounds
-                context.user_data['chat_history'] = chat.get_history()[-MAX_MEMORY:]
-
+                response = client.models.generate_content(model="gemini-2.5-flash", contents=update.message.text)
                 msg = await update.message.reply_text(response.text)
                 record_message(user_id, msg.message_id)
                 return
             except Exception as e:
                 if "429" in str(e):
-                    logging.warning(f"🔄 Key {current_key_index} rate limited. Rotating...")
+                    logging.warning(f"Key index {current_key_index} rate limited. Rotating...")
                     current_key_index = (current_key_index + 1) % len(GEMINI_KEYS)
                     client = get_gemini_client()
                     continue
@@ -155,11 +127,11 @@ async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text("⚠️ All keys are rate-limited. Try again in a minute.")
     else:
-        # Default Bridge Mode
-        msg = await update.message.reply_text(f"✅ Bridge: {raw_text}")
+        msg = await update.message.reply_text(f"✅ Bridge: {update.message.text}")
         record_message(user_id, msg.message_id)
 
 if __name__ == '__main__':
+    # Start the web server and the heartbeat in separate background threads
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=internal_heartbeat, daemon=True).start()
     
